@@ -1,7 +1,5 @@
-# run.py
-from src.evaluation.evaluator import RankingEvaluator
 from __future__ import annotations
-
+from src.evaluation.evaluator import RankingEvaluator
 import argparse
 import inspect
 from pathlib import Path
