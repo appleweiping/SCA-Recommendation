@@ -116,6 +116,100 @@ def build_sca_model(
     model = SCA(**filtered_kwargs)
     return model
 
+def inspect_data_bundle(data_bundle) -> None:
+    """
+    Diagnose whether the processed split is valid for recommendation evaluation.
+    """
+    train_user_pos = data_bundle.train_user_pos_dict
+    valid_user_pos = data_bundle.valid_user_pos_dict
+    test_user_pos = data_bundle.test_user_pos_dict
+
+    train_users = [u for u, items in train_user_pos.items() if len(items) > 0]
+    valid_users = [u for u, items in valid_user_pos.items() if len(items) > 0]
+    test_users = [u for u, items in test_user_pos.items() if len(items) > 0]
+
+    print("[DIAG] ===== Data Split Inspection =====")
+    print(f"[DIAG] num_users={data_bundle.num_users}, num_items={data_bundle.num_items}")
+    print(f"[DIAG] train_pairs={len(data_bundle.train_pairs)}")
+    print(f"[DIAG] valid_pairs={len(data_bundle.valid_pairs)}")
+    print(f"[DIAG] test_pairs={len(data_bundle.test_pairs)}")
+    print(f"[DIAG] train_users={len(train_users)}")
+    print(f"[DIAG] valid_users={len(valid_users)}")
+    print(f"[DIAG] test_users={len(test_users)}")
+
+    # overlap check
+    train_valid_overlap_users = 0
+    train_test_overlap_users = 0
+    valid_test_overlap_users = 0
+
+    train_valid_overlap_items = 0
+    train_test_overlap_items = 0
+    valid_test_overlap_items = 0
+
+    for u in range(data_bundle.num_users):
+        train_items = train_user_pos.get(u, set())
+        valid_items = valid_user_pos.get(u, set())
+        test_items = test_user_pos.get(u, set())
+
+        tv = train_items & valid_items
+        tt = train_items & test_items
+        vt = valid_items & test_items
+
+        if len(tv) > 0:
+            train_valid_overlap_users += 1
+            train_valid_overlap_items += len(tv)
+        if len(tt) > 0:
+            train_test_overlap_users += 1
+            train_test_overlap_items += len(tt)
+        if len(vt) > 0:
+            valid_test_overlap_users += 1
+            valid_test_overlap_items += len(vt)
+
+    print(f"[DIAG] train-valid overlap users={train_valid_overlap_users}, items={train_valid_overlap_items}")
+    print(f"[DIAG] train-test overlap users={train_test_overlap_users}, items={train_test_overlap_items}")
+    print(f"[DIAG] valid-test overlap users={valid_test_overlap_users}, items={valid_test_overlap_items}")
+
+    # per-user label stats
+    valid_gt_counts = [len(valid_user_pos[u]) for u in valid_users]
+    test_gt_counts = [len(test_user_pos[u]) for u in test_users]
+
+    if len(valid_gt_counts) > 0:
+        print(
+            "[DIAG] valid gt per user | "
+            f"min={min(valid_gt_counts)}, max={max(valid_gt_counts)}, "
+            f"avg={sum(valid_gt_counts)/len(valid_gt_counts):.4f}"
+        )
+
+    if len(test_gt_counts) > 0:
+        print(
+            "[DIAG] test gt per user | "
+            f"min={min(test_gt_counts)}, max={max(test_gt_counts)}, "
+            f"avg={sum(test_gt_counts)/len(test_gt_counts):.4f}"
+        )
+
+    # candidate size under test protocol: num_items - seen(train+valid)
+    candidate_sizes = []
+    for u in test_users[:20]:
+        seen_items = set()
+        seen_items |= train_user_pos.get(u, set())
+        seen_items |= valid_user_pos.get(u, set())
+        candidate_size = data_bundle.num_items - len(seen_items)
+        candidate_sizes.append(candidate_size)
+        print(
+            f"[DIAG] user={u} | train={len(train_user_pos.get(u, set()))} | "
+            f"valid={len(valid_user_pos.get(u, set()))} | "
+            f"test={len(test_user_pos.get(u, set()))} | "
+            f"candidate={candidate_size}"
+        )
+
+    if len(candidate_sizes) > 0:
+        print(
+            "[DIAG] sampled candidate size | "
+            f"min={min(candidate_sizes)}, max={max(candidate_sizes)}, "
+            f"avg={sum(candidate_sizes)/len(candidate_sizes):.2f}"
+        )
+
+    print("[DIAG] ===== End Inspection =====")
 
 def build_optimizer(
     model: torch.nn.Module,
@@ -156,6 +250,7 @@ def main() -> None:
         f"num_items={data_bundle.num_items}, "
         f"train_pairs={len(data_bundle.train_pairs)}"
     )
+    inspect_data_bundle(data_bundle)
 
     model = build_sca_model(
         config=config,

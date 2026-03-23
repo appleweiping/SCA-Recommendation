@@ -33,8 +33,9 @@ class RankingEvaluator:
             raise ValueError(f"Unknown split: {split}")
 
         train_user_pos_dict = data_bundle.train_user_pos_dict
+        valid_user_pos_dict = data_bundle.valid_user_pos_dict
 
-        # ✅ 修复1：过滤没有 ground-truth 的用户
+        # 只保留当前 split 中有 ground-truth 的用户
         user_ids = [u for u, items in user_pos_dict.items() if len(items) > 0]
 
         results = {}
@@ -49,7 +50,6 @@ class RankingEvaluator:
             batch_users = user_ids[i:i + batch_size]
             batch_users_tensor = torch.tensor(batch_users, dtype=torch.long).to(self.device)
 
-            # ⭐ 核心：调用 SCA full sort
             scores = model.full_sort_predict(
                 norm_adj=norm_adj,
                 user_ids=batch_users_tensor,
@@ -59,19 +59,26 @@ class RankingEvaluator:
             scores = scores.cpu()
 
             for idx, user_id in enumerate(batch_users):
-                # ✅ 修复2：clone，避免污染 batch tensor
                 user_scores = scores[idx].clone()
 
-                # ❗mask training interactions
-                train_items = train_user_pos_dict.get(user_id, set())
-                if len(train_items) > 0:
-                    user_scores[list(train_items)] = -1e9
+                # valid 阶段：mask train
+                # test 阶段：mask train + valid
+                if split == "test":
+                    seen_items = set()
+                    seen_items |= train_user_pos_dict.get(user_id, set())
+                    seen_items |= valid_user_pos_dict.get(user_id, set())
+                else:
+                    seen_items = train_user_pos_dict.get(user_id, set())
+
+                if len(seen_items) > 0:
+                    user_scores[list(seen_items)] = -1e9
 
                 ranked_items = torch.argsort(user_scores, descending=True).tolist()
 
                 gt_items = user_pos_dict[user_id]
+                if len(gt_items) == 0:
+                    continue
 
-                # ✅ 修复3：直接支持 multi-ground-truth（更规范）
                 for k in self.k_list:
                     results[f"Recall@{k}"].append(
                         recall_at_k(ranked_items, gt_items, k)
@@ -83,8 +90,8 @@ class RankingEvaluator:
                         hit_rate_at_k(ranked_items, gt_items, k)
                     )
 
-        final_results = {
-            metric: float(np.mean(values)) for metric, values in results.items()
-        }
+        final_results = {}
+        for metric, values in results.items():
+            final_results[metric] = float(np.mean(values)) if len(values) > 0 else 0.0
 
         return final_results
