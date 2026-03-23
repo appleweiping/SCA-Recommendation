@@ -1,5 +1,5 @@
 # run.py
-
+from src.evaluation.evaluator import RankingEvaluator
 from __future__ import annotations
 
 import argparse
@@ -219,7 +219,18 @@ def main() -> None:
             )
 
     print("[INFO] Training finished.")
+    print("[INFO] Start evaluation...")
 
+    evaluator = RankingEvaluator(k_list=[10], device=device)
+
+    results = evaluator.evaluate(
+        model=model,
+        data_bundle=data_bundle,
+        split="test"
+    )
+
+    print("[RESULT] Test Metrics:")
+    print(results)
 
 if __name__ == "__main__":
     main()
