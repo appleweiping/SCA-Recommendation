@@ -210,52 +210,6 @@ Interested in these topics? Let's connect:
 
 ---
 
-## 🔥 Contribution Streak
-
-<div align="center">
-
-<img src="https://github-readme-streak-stats.herokuapp.com/?user=appleweiping&theme=tokyonight&hide_border=true"/>
-
-</div>
-
----
-
-## ⏱️ Wakatime Coding Stats
-
-<!--
-  前置步骤（一次性配置，之后全自动）：
-  1. 注册 https://wakatime.com 并在 VS Code / PyCharm 安装插件
-  2. 仓库 Settings → Secrets and variables → Actions → 新建 WAKATIME_API_KEY
-  3. 在本仓库新建文件 .github/workflows/waka-readme.yml，内容如下：
-
-  ────────────────────────────────────────
-  name: Waka Readme
-  on:
-    schedule:
-      - cron: "0 0 * * *"
-    workflow_dispatch:
-  jobs:
-    update-readme:
-      runs-on: ubuntu-latest
-      steps:
-        - uses: anmol098/waka-readme-stats@master
-          with:
-            WAKATIME_API_KEY: ${{ secrets.WAKATIME_API_KEY }}
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-            SHOW_LINES_OF_CODE: true
-            SHOW_PROFILE_VIEWS: false
-            SHOW_COMMIT: true
-            SHOW_LANGUAGE: true
-            SHOW_OS: true
-  ────────────────────────────────────────
-
-  4. 配置后手动触发一次 workflow，下方标记区域将自动填充真实数据
--->
-
-<!--START_SECTION:waka-->
-<!--END_SECTION:waka-->
-
----
 
 <div align="center">
 
