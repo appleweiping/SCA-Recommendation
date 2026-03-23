@@ -12,7 +12,7 @@ model:
   semantic_use_mlp: false
   semantic_normalize: true
   gate_type: vector
-  control_scale: 1.0
+  control_scale: 0.0
   dropout: 0.0
 
 train:
