@@ -133,14 +133,11 @@ class SCA(nn.Module):
         Returns:
             c_u: (B, D)
         """
-        user_item_sub = user_item_matrix[user_ids]  # (B, num_items)
+        user_item_dense = user_item_matrix.to_dense()
+        user_item_sub = user_item_dense[user_ids]  # (B, num_items)
 
-        if user_item_sub.is_sparse:
-            c_u = torch.sparse.mm(user_item_sub, item_all_embeddings)
-            row_sum = torch.sparse.sum(user_item_sub, dim=1).to_dense().unsqueeze(-1)
-        else:
-            c_u = torch.matmul(user_item_sub, item_all_embeddings)
-            row_sum = user_item_sub.sum(dim=1, keepdim=True)
+        c_u = torch.matmul(user_item_sub, item_all_embeddings)
+        row_sum = user_item_sub.sum(dim=1, keepdim=True)
 
         row_sum = row_sum.clamp_min(1.0)
         c_u = c_u / row_sum
