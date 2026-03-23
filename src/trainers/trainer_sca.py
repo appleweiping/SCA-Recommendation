@@ -15,30 +15,12 @@ from src.trainers.trainer_base import BaseTrainer
 
 class SCATrainer(BaseTrainer):
     """
-    Stable and runnable trainer for SCA.
+    Minimal runnable trainer for SCA.
 
-    Design choice:
-        - Recompute LightGCN collaborative embeddings for each batch
-        - Each batch performs:
-              1) graph propagation
-              2) batch indexing
-              3) semantic projection
-              4) structural context aggregation
-              5) gate fusion
-              6) BPR + alignment + regularization
-              7) backward + optimizer step
-
-    Why this version:
-        - avoids retain_graph across all batches in one epoch
-        - avoids large shared autograd graphs
-        - keeps backbone trainable
-        - matches standard stable training practice
-
-    Required model interface:
-        model.get_collaborative_embeddings(norm_adj)
-        model.project_semantic_signal(user_ids)
-        model.aggregate_structural_context(user_ids, item_all_embeddings, user_item_matrix)
-        model.fuse_user_representation(e_u, c_u, delta_u)
+    Current version:
+    - standard per-batch recompute for collaborative embeddings
+    - no retain_graph
+    - adds debug statistics into epoch metrics
     """
 
     def __init__(
@@ -81,11 +63,9 @@ class SCATrainer(BaseTrainer):
             align_type=align_type,
         ).to(self.device)
 
-        # Static tensors reused across training
         self.norm_adj = data_bundle.norm_adj.to(self.device)
         self.user_item_matrix = data_bundle.user_item_matrix.to(self.device)
 
-        # Dataloader: positive pairs + negative sampling in collator
         self.train_dataset = InteractionDataset(data_bundle.train_pairs)
         self.train_collator = BPRTrainCollator(
             num_items=data_bundle.num_items,
@@ -102,14 +82,12 @@ class SCATrainer(BaseTrainer):
             drop_last=self.drop_last,
         )
 
-    def _forward_batch(
+    def _forward_one_batch(
         self,
         batch: Dict[str, torch.Tensor],
-        user_all_embeddings: torch.Tensor,
-        item_all_embeddings: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward one batch using current collaborative embeddings.
+        Forward one batch using per-batch recompute.
 
         Input batch dict:
             user_ids:     (B,)
@@ -128,35 +106,40 @@ class SCATrainer(BaseTrainer):
             pos_scores:   (B,)
             neg_scores:   (B,)
         """
-        user_ids = batch["user_ids"]
-        pos_item_ids = batch["pos_item_ids"]
-        neg_item_ids = batch["neg_item_ids"]
+        user_ids = batch["user_ids"]          # (B,)
+        pos_item_ids = batch["pos_item_ids"]  # (B,)
+        neg_item_ids = batch["neg_item_ids"]  # (B,)
 
-        # 1) collaborative branch indexing
-        e_u = user_all_embeddings[user_ids]
-        pos_item_emb = item_all_embeddings[pos_item_ids]
-        neg_item_emb = item_all_embeddings[neg_item_ids]
+        # 1) recompute collaborative embeddings every batch
+        user_all_embeddings, item_all_embeddings = self.model.get_collaborative_embeddings(
+            self.norm_adj
+        )
 
-        # 2) semantic branch
+        # 2) index collaborative embeddings
+        e_u = user_all_embeddings[user_ids]               # (B, D)
+        pos_item_emb = item_all_embeddings[pos_item_ids]  # (B, D)
+        neg_item_emb = item_all_embeddings[neg_item_ids]  # (B, D)
+
+        # 3) semantic branch
         z_u, delta_u = self.model.project_semantic_signal(user_ids)
 
-        # 3) structural context branch
+        # 4) structural context
         c_u = self.model.aggregate_structural_context(
             user_ids=user_ids,
             item_all_embeddings=item_all_embeddings,
             user_item_matrix=self.user_item_matrix,
         )
 
-        # 4) semantic control fusion
+        # 5) control injection
         user_emb, g_u = self.model.fuse_user_representation(
             e_u=e_u,
             c_u=c_u,
             delta_u=delta_u,
         )
 
-        # 5) pairwise ranking scores
-        pos_scores = torch.sum(user_emb * pos_item_emb, dim=-1)
-        neg_scores = torch.sum(user_emb * neg_item_emb, dim=-1)
+        # 6) pairwise scores
+        pos_scores = torch.sum(user_emb * pos_item_emb, dim=-1)  # (B,)
+        neg_scores = torch.sum(user_emb * neg_item_emb, dim=-1)  # (B,)
 
         return {
             "user_emb": user_emb,
@@ -171,34 +154,36 @@ class SCATrainer(BaseTrainer):
             "neg_scores": neg_scores,
         }
 
-    def _compute_loss(
-        self,
-        outputs: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Compute SCA loss from batch outputs.
-        """
-        return self.criterion(
-            outputs["pos_scores"],
-            outputs["neg_scores"],
-            outputs["delta_u"],
-            outputs["c_u"],
-            outputs["user_emb"],
-            outputs["pos_item_emb"],
-            outputs["neg_item_emb"],
-        )
-
     def train_one_epoch(self, epoch: int) -> Dict[str, float]:
         """
-        Train one epoch with per-batch recomputation of collaborative embeddings.
+        Train one epoch and return scalar metrics.
+
+        Added debug stats:
+            - pos_scores_mean
+            - neg_scores_mean
+            - pos_gt_neg_ratio
+            - delta_abs_mean
+            - gate_mean
+            - gate_std
+            - control_shift_mean = (user_emb - e_u).abs().mean()
         """
         self.model.train()
+        self.optimizer.zero_grad(set_to_none=True)
 
         total_loss = 0.0
         total_bpr = 0.0
         total_align = 0.0
         total_reg = 0.0
         total_examples = 0
+
+        # debug stats
+        total_pos_scores_mean = 0.0
+        total_neg_scores_mean = 0.0
+        total_pos_gt_neg_ratio = 0.0
+        total_delta_abs_mean = 0.0
+        total_gate_mean = 0.0
+        total_gate_std = 0.0
+        total_control_shift_mean = 0.0
 
         num_batches = len(self.train_loader)
         if num_batches == 0:
@@ -209,30 +194,57 @@ class SCATrainer(BaseTrainer):
             batch_size = batch["user_ids"].size(0)
             total_examples += batch_size
 
-            self.optimizer.zero_grad(set_to_none=True)
+            outputs = self._forward_one_batch(batch=batch)
 
-            # Recompute collaborative embeddings for this batch step
-            user_all_embeddings, item_all_embeddings = self.model.get_collaborative_embeddings(
-                self.norm_adj
+            loss_dict = self.criterion(
+                outputs["pos_scores"],
+                outputs["neg_scores"],
+                outputs["delta_u"],
+                outputs["c_u"],
+                outputs["user_emb"],
+                outputs["pos_item_emb"],
+                outputs["neg_item_emb"],
             )
 
-            outputs = self._forward_batch(
-                batch=batch,
-                user_all_embeddings=user_all_embeddings,
-                item_all_embeddings=item_all_embeddings,
-            )
-
-            loss_dict = self._compute_loss(outputs)
             loss = loss_dict["loss"]
-
             loss.backward()
+
             self.clip_gradients()
             self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
 
+            # base losses
             total_loss += float(loss.detach().item()) * batch_size
             total_bpr += float(loss_dict["bpr_loss"].detach().item()) * batch_size
             total_align += float(loss_dict["align_loss"].detach().item()) * batch_size
             total_reg += float(loss_dict["reg_loss"].detach().item()) * batch_size
+
+            # debug stats
+            pos_scores_mean = outputs["pos_scores"].detach().mean().item()
+            neg_scores_mean = outputs["neg_scores"].detach().mean().item()
+            pos_gt_neg_ratio = (
+                (outputs["pos_scores"].detach() > outputs["neg_scores"].detach())
+                .float()
+                .mean()
+                .item()
+            )
+            delta_abs_mean = outputs["delta_u"].detach().abs().mean().item()
+            gate_mean = outputs["g_u"].detach().mean().item()
+            gate_std = outputs["g_u"].detach().std().item()
+            control_shift_mean = (
+                (outputs["user_emb"].detach() - outputs["e_u"].detach())
+                .abs()
+                .mean()
+                .item()
+            )
+
+            total_pos_scores_mean += pos_scores_mean * batch_size
+            total_neg_scores_mean += neg_scores_mean * batch_size
+            total_pos_gt_neg_ratio += pos_gt_neg_ratio * batch_size
+            total_delta_abs_mean += delta_abs_mean * batch_size
+            total_gate_mean += gate_mean * batch_size
+            total_gate_std += gate_std * batch_size
+            total_control_shift_mean += control_shift_mean * batch_size
 
         self.step_scheduler()
 
@@ -244,6 +256,14 @@ class SCATrainer(BaseTrainer):
             "reg_loss": total_reg / max(total_examples, 1),
             "num_examples": float(total_examples),
             "num_batches": float(num_batches),
+            # debug metrics
+            "pos_scores_mean": total_pos_scores_mean / max(total_examples, 1),
+            "neg_scores_mean": total_neg_scores_mean / max(total_examples, 1),
+            "pos_gt_neg_ratio": total_pos_gt_neg_ratio / max(total_examples, 1),
+            "delta_abs_mean": total_delta_abs_mean / max(total_examples, 1),
+            "gate_mean": total_gate_mean / max(total_examples, 1),
+            "gate_std": total_gate_std / max(total_examples, 1),
+            "control_shift_mean": total_control_shift_mean / max(total_examples, 1),
         }
         return metrics
 
@@ -258,14 +278,7 @@ class SCATrainer(BaseTrainer):
         batch = next(iter(self.train_loader))
         batch = self.move_batch_to_device(batch)
 
-        user_all_embeddings, item_all_embeddings = self.model.get_collaborative_embeddings(
-            self.norm_adj
-        )
-        outputs = self._forward_batch(
-            batch=batch,
-            user_all_embeddings=user_all_embeddings,
-            item_all_embeddings=item_all_embeddings,
-        )
+        outputs = self._forward_one_batch(batch=batch)
 
         shape_dict = {
             "user_ids": tuple(batch["user_ids"].shape),

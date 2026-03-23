@@ -44,15 +44,10 @@ def load_config(config_path: str | Path) -> Dict[str, Any]:
 def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    # Minimal runnable setting; deterministic flags are omitted for simplicity.
 
 
 def ensure_required_keys(config: Dict[str, Any]) -> None:
-    required_keys = [
-        "data",
-        "model",
-        "train",
-    ]
+    required_keys = ["data", "model", "train"]
     for key in required_keys:
         if key not in config:
             raise KeyError(f"Missing required config section: '{key}'")
@@ -85,13 +80,6 @@ def build_sca_model(
     num_users: int,
     num_items: int,
 ) -> torch.nn.Module:
-    """
-    Build SCA model from config.
-
-    Reasonable default:
-    - SemanticEncoder runs in fallback/trainable-user-semantic mode unless you
-      later inject offline semantic features.
-    """
     model_cfg = config["model"]
 
     backbone = LightGCN(
@@ -110,7 +98,6 @@ def build_sca_model(
         normalize=model_cfg.get("semantic_normalize", True),
     )
 
-    # Try to be robust to small constructor changes in SCA.
     sca_kwargs = {
         "backbone": backbone,
         "semantic_encoder": semantic_encoder,
@@ -157,9 +144,6 @@ def main() -> None:
 
     save_dir = maybe_make_save_dir(config)
 
-    # ------------------------------------------------------------------
-    # 1) Build interaction data bundle
-    # ------------------------------------------------------------------
     data_cfg = config["data"]
     data_bundle = build_interaction_data_bundle(
         train_path=data_cfg["train_path"],
@@ -175,23 +159,14 @@ def main() -> None:
         f"train_pairs={len(data_bundle.train_pairs)}"
     )
 
-    # ------------------------------------------------------------------
-    # 2) Build model
-    # ------------------------------------------------------------------
     model = build_sca_model(
         config=config,
         num_users=data_bundle.num_users,
         num_items=data_bundle.num_items,
     )
 
-    # ------------------------------------------------------------------
-    # 3) Build optimizer
-    # ------------------------------------------------------------------
     optimizer = build_optimizer(model, config)
 
-    # ------------------------------------------------------------------
-    # 4) Build trainer
-    # ------------------------------------------------------------------
     train_cfg = config["train"]
     trainer = SCATrainer(
         model=model,
@@ -211,16 +186,12 @@ def main() -> None:
         drop_last=train_cfg.get("drop_last", False),
     )
 
-    # Optional sanity check
     try:
         shape_info = trainer.inspect_one_batch()
         print(f"[INFO] Batch inspection: {shape_info}")
     except Exception as e:
         print(f"[WARN] inspect_one_batch failed: {e}")
 
-    # ------------------------------------------------------------------
-    # 5) Train epochs
-    # ------------------------------------------------------------------
     epochs = train_cfg["epochs"]
     for epoch in range(1, epochs + 1):
         metrics = trainer.train_one_epoch(epoch)
@@ -230,7 +201,14 @@ def main() -> None:
             f"loss={metrics['loss']:.6f} | "
             f"bpr={metrics['bpr_loss']:.6f} | "
             f"align={metrics['align_loss']:.6f} | "
-            f"reg={metrics['reg_loss']:.6f}"
+            f"reg={metrics['reg_loss']:.6f} | "
+            f"pos_mean={metrics['pos_scores_mean']:.6f} | "
+            f"neg_mean={metrics['neg_scores_mean']:.6f} | "
+            f"pos>neg={metrics['pos_gt_neg_ratio']:.6f} | "
+            f"delta_abs={metrics['delta_abs_mean']:.6f} | "
+            f"gate_mean={metrics['gate_mean']:.6f} | "
+            f"gate_std={metrics['gate_std']:.6f} | "
+            f"ctrl_shift={metrics['control_shift_mean']:.6f}"
         )
 
         if save_dir is not None and train_cfg.get("save_every_epoch", False):
