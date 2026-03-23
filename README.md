@@ -1,4 +1,4 @@
-# 🔥 SCA-Recommendation  
+# 🔥 SCA-Recommendation
 ### Structure-aware Control Alignment for LLM-enhanced Recommendation
 
 <p align="center">
@@ -11,7 +11,7 @@
 
 SCA (Structure-aware Control Alignment) is a novel recommendation framework that integrates semantic signals into collaborative filtering via **control mechanisms**, rather than conventional embedding fusion.
 
-> 💡 Instead of asking *"what is similar?"*, we ask:  
+> 💡 Instead of asking *"what is similar?"*, we ask:
 > **"how should decisions be adjusted?"**
 
 ---
@@ -31,45 +31,47 @@ SCA (Structure-aware Control Alignment) is a novel recommendation framework that
 <p align="center">
   <i>Conceptual pipeline of SCA</i>
 </p>
-User → Semantic Encoder → Δ_u (control signal)
-→ Gate → g_u
-→ LightGCN → e_u
-→ Controlled Representation:
-ẽ_u = e_u + g_u ⊙ Δ_u
 
-text
+```
+User → Semantic Encoder → Δ_u (control signal)
+     → Gate → g_u
+     → LightGCN → e_u
+     → Controlled Representation:
+       ẽ_u = e_u + g_u ⊙ Δ_u
+```
 
 ---
 
 ## 📦 Project Structure
+
+```
 SCA-Recommendation/
 │
 ├── configs/
-│ ├── sca_default.yaml # Control ON
-│ └── sca_off.yaml # Control OFF (ablation)
+│   ├── sca_default.yaml        # Control ON
+│   └── sca_off.yaml            # Control OFF (ablation)
 │
 ├── src/
-│ ├── models/
-│ │ ├── lightgcn.py
-│ │ ├── semantic_encoder.py
-│ │ ├── gate.py
-│ │ ├── sca.py ⭐ Core
-│ │ └── losses.py
-│ │
-│ ├── data/
-│ │ ├── dataset.py
-│ │ └── sampler.py
-│ │
-│ ├── trainers/
-│ │ ├── trainer_base.py
-│ │ └── trainer_sca.py
-│ │
-│ └── evaluation/ 🚧 In Progress
+│   ├── models/
+│   │   ├── lightgcn.py
+│   │   ├── semantic_encoder.py
+│   │   ├── gate.py
+│   │   ├── sca.py              ⭐ Core
+│   │   └── losses.py
+│   │
+│   ├── data/
+│   │   ├── dataset.py
+│   │   └── sampler.py
+│   │
+│   ├── trainers/
+│   │   ├── trainer_base.py
+│   │   └── trainer_sca.py
+│   │
+│   └── evaluation/             🚧 In Progress
 │
 ├── run.py
 └── README.md
-
-text
+```
 
 ---
 
@@ -77,74 +79,101 @@ text
 
 ```bash
 pip install torch pandas pyyaml
-▶️ Run
-✅ Train (Control ON)
-bash
+```
+
+---
+
+## ▶️ Run
+
+### ✅ Train (Control ON)
+
+```bash
 py run.py
-❌ Ablation (Control OFF)
-bash
+```
+
+### ❌ Ablation (Control OFF)
+
+```bash
 py run.py --config configs/sca_off.yaml
-📊 Training Snapshot
-text
+```
+
+---
+
+## 📊 Training Snapshot
+
+```
 Epoch 3:
-loss ↓
-bpr ↓
-align ↓
-pos_score ↑
-neg_score ↓
-🔬 Ablation Study (Core Insight)
-Setting	Control Shift	Performance
-ON	> 0	Strong
-OFF	0	Weaker
-✔ Key Findings
-Semantic signal is not auxiliary, but causal
+  loss      ↓
+  bpr       ↓
+  align     ↓
+  pos_score ↑
+  neg_score ↓
+```
 
-Control mechanism actively modifies decisions
+---
 
-Gate remains non-trivial (non-collapsed)
+## 🔬 Ablation Study (Core Insight)
 
-⚠️ Current Status
-✅ Model fully implemented
+| Setting | Control Shift | Performance |
+|---------|--------------|-------------|
+| ON      | > 0          | Strong      |
+| OFF     | 0            | Weaker      |
 
-✅ Training pipeline complete
+### ✔ Key Findings
 
-✅ Mechanism validated (ON vs OFF)
+- Semantic signal is not auxiliary, but **causal**
+- Control mechanism actively **modifies decisions**
+- Gate remains **non-trivial** (non-collapsed)
 
-🚧 Real dataset experiments (in progress)
+---
 
-🧪 Upcoming Experiments
-MovieLens-1M
+## ⚠️ Current Status
 
-Amazon Books
+- ✅ Model fully implemented
+- ✅ Training pipeline complete
+- ✅ Mechanism validated (ON vs OFF)
+- 🚧 Real dataset experiments (in progress)
 
-Recall@K / NDCG@K
+---
 
-Cold-start analysis
+## 🧪 Upcoming Experiments
 
-Sparsity robustness
+- MovieLens-1M
+- Amazon Books
+- Recall@K / NDCG@K
+- Cold-start analysis
+- Sparsity robustness
 
-🧠 Contribution
+---
+
+## 🧠 Contribution
+
 🔥 SCA introduces a new perspective:
 
-❌ Not embedding fusion
+- ❌ Not embedding fusion
+- ❌ Not feature augmentation
+- ✅ **Decision-level control learning**
 
-❌ Not feature augmentation
+---
 
-✅ Decision-level control learning
+## 📌 Vision
 
-📌 Vision
 We believe recommendation systems should move toward:
 
-Controllable, interpretable, and semantic-aware decision models
+> **Controllable, interpretable, and semantic-aware decision models**
 
-🤝 Contact
+---
+
+## 🤝 Contact
+
 Research project on:
 
-LLM for Recommendation
+- LLM for Recommendation
+- Hybrid Semantic-CF Models
+- Decision Learning
 
-Hybrid Semantic-CF Models
+---
 
-Decision Learning
+## ⭐ Star This Repo
 
-⭐ Star This Repo
 If you find this interesting or useful, consider giving it a ⭐!
