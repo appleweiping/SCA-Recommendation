@@ -85,7 +85,13 @@ SCA-Recommendation/
 │   │   ├── trainer_base.py
 │   │   └── trainer_sca.py
 │   │
-│   └── evaluation/             🚧 In Progress
+│   └── evaluation/
+│       ├── metrics.py          ✅ Recall@K, NDCG@K, HR@K
+│       └── evaluator.py        ✅ Full ranking evaluation
+│
+├── scripts/
+│   ├── preprocess_ml1m.py      ✅ ratings.dat → interactions.csv
+│   └── split_ml1m.py           ✅ Leave-one-out split
 │
 ├── run.py
 └── README.md
@@ -119,6 +125,49 @@ py run.py --config configs/sca_off.yaml
 
 ---
 
+## 📊 Dataset: MovieLens-1M
+
+> ✅ Real dataset pipeline fully connected as of March 24, 2025.
+
+| Split | Count |
+|-------|------:|
+| Users | 6,041 |
+| Items | 3,953 |
+| Train interactions | 988,129 |
+| Validation interactions | 6,040 |
+| Test interactions | 6,040 |
+
+### Preprocessing
+
+```bash
+# Step 1: Convert ratings.dat → interactions.csv (implicit feedback)
+py scripts/preprocess_ml1m.py
+
+# Step 2: Leave-one-out split
+py scripts/split_ml1m.py
+```
+
+### Evaluation Protocol
+
+We follow the **leave-one-out** protocol standard in top-tier venues (SIGIR / KDD / WWW):
+
+- **Train**: all interactions except the last two per user
+- **Valid**: second-to-last interaction per user
+- **Test**: last interaction per user
+- **No overlap** across splits (verified: train/valid/test overlap = 0)
+- Each user has exactly **1 ground-truth item** in the test set
+- **Full-ranking evaluation** over all unobserved items (~3,800 candidates per user)
+
+### Metrics
+
+| Metric | Description |
+|--------|-------------|
+| Recall@K | Fraction of relevant items retrieved in top-K |
+| NDCG@K | Ranking quality with position discounting |
+| HR@K | Hit ratio at K |
+
+---
+
 ## 📊 Training Snapshot
 
 ```
@@ -128,7 +177,17 @@ Epoch 3:
   align     ↓
   pos_score ↑
   neg_score ↓
+
+System health check (ML-1M):
+  num_users   = 6041   ✔
+  candidate   ≈ 3800   ✔
+  train_pairs ≈ 988K   ✔
+  pos > neg   = 1.0    ✔
+  gate_mean   ≈ 0.5    ✔
+  ctrl_shift  ≈ 0.05   ✔
 ```
+
+> 👉 Model is learning normally; control mechanism is active and non-collapsed.
 
 ---
 
@@ -145,6 +204,8 @@ Epoch 3:
 - Control mechanism actively **modifies decisions**
 - Gate remains **non-trivial** (non-collapsed)
 
+> ⚠️ Full quantitative results (Recall@10, NDCG@10) pending experiment completion.
+
 ---
 
 ## ⚠️ Current Status
@@ -153,17 +214,23 @@ Epoch 3:
 |-----------|--------|
 | Model Implementation | ✅ Complete |
 | Training Pipeline | ✅ Complete |
+| Evaluation Module (metrics + evaluator) | ✅ Complete |
+| Data Preprocessing (ML-1M) | ✅ Complete |
+| Leave-one-out Split | ✅ Complete |
 | Mechanism Validation (ON vs OFF) | ✅ Complete |
-| Real Dataset Experiments | 🚧 In Progress |
-| Evaluation Module | 🚧 In Progress |
+| Real Dataset Experiments (ML-1M running) | 🚧 In Progress |
+| Quantitative Results (Recall/NDCG) | 🚧 Pending |
+| Comparison Baselines | 🚧 In Progress |
 
 ---
 
 ## 🧪 Upcoming Experiments
 
-- [ ] MovieLens-1M
+- [x] MovieLens-1M data pipeline
+- [x] Recall@K / NDCG@K / HR@K evaluation
+- [ ] Full SCA-on vs SCA-off comparison results
+- [ ] LightGCN baseline
 - [ ] Amazon Books
-- [ ] Recall@K / NDCG@K evaluation
 - [ ] Cold-start analysis
 - [ ] Sparsity robustness study
 
@@ -209,7 +276,6 @@ Interested in these topics? Let's connect:
 </div>
 
 ---
-
 
 <div align="center">
 
