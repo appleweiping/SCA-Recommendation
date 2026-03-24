@@ -14,5 +14,5 @@ model:
 
 train:
   lr: 0.001
-  batch_size: 256
-  epochs: 3
+  batch_size: 1024
+  epochs: 1
