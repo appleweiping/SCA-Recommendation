@@ -18,6 +18,13 @@ model:
   control_scale: 0.0
   dropout: 0.0
 
+  # ✅ 新增（核心）
+  use_control: false
+  use_gate: true
+  use_alignment: true
+  use_structure: true
+  fusion_mode: false
+
 train:
   lr: 0.001
   weight_decay: 0.0
