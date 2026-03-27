@@ -1,0 +1,44 @@
+seed: 2024
+
+data:
+  train_path: data/processed/ml-1m/train.csv
+  valid_path: data/processed/ml-1m/valid.csv
+  test_path: data/processed/ml-1m/test.csv
+
+model:
+  name: sca
+  embedding_dim: 64
+  num_layers: 3
+  semantic_input_dim: 16
+  semantic_dim: 32
+  semantic_dropout: 0.0
+  semantic_use_mlp: false
+  semantic_normalize: true
+  gate_type: vector
+  control_scale: 1.0
+  dropout: 0.0
+
+  use_control: true
+  use_gate: false
+  use_alignment: true
+  use_structure: true
+  fusion_mode: false
+
+train:
+  lr: 0.001
+  weight_decay: 0.0
+  batch_size: 4096
+  epochs: 10
+  num_workers: 0
+  shuffle: true
+  grad_clip_norm: 5.0
+  lambda_align: 0.1
+  lambda_reg: 1.0e-4
+  align_type: cosine
+  pin_memory: false
+  drop_last: false
+  save_every_epoch: false
+  max_batches_per_epoch: 50
+
+output:
+  save_dir: outputs/sca_wogate_mid
