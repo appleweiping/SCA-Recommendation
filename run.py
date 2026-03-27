@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from src.evaluation.evaluator import RankingEvaluator
 import argparse
 import inspect
@@ -13,10 +14,11 @@ from src.models.lightgcn import LightGCN
 from src.models.semantic_encoder import SemanticEncoder
 from src.models.sca import SCA
 from src.trainers.trainer_sca import SCATrainer
+from src.trainers.trainer_lightgcn import LightGCNTrainer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Minimal runnable pipeline for SCA.")
+    parser = argparse.ArgumentParser(description="Minimal runnable pipeline for SCA / LightGCN.")
     parser.add_argument(
         "--config",
         type=str,
@@ -55,10 +57,20 @@ def ensure_required_keys(config: Dict[str, Any]) -> None:
         if key not in config["data"]:
             raise KeyError(f"Missing required config key: data.{key}")
 
-    model_keys = ["embedding_dim", "num_layers", "semantic_input_dim", "semantic_dim"]
-    for key in model_keys:
+    model_type = config["model"].get("name", "sca").lower()
+
+    # shared model keys
+    shared_model_keys = ["embedding_dim", "num_layers"]
+    for key in shared_model_keys:
         if key not in config["model"]:
             raise KeyError(f"Missing required config key: model.{key}")
+
+    # sca-only keys
+    if model_type == "sca":
+        sca_model_keys = ["semantic_input_dim", "semantic_dim"]
+        for key in sca_model_keys:
+            if key not in config["model"]:
+                raise KeyError(f"Missing required config key for SCA: model.{key}")
 
     train_keys = ["lr", "batch_size", "epochs"]
     for key in train_keys:
@@ -71,6 +83,22 @@ def maybe_make_save_dir(config: Dict[str, Any]) -> str | None:
     if save_dir is not None:
         Path(save_dir).mkdir(parents=True, exist_ok=True)
     return save_dir
+
+
+def build_lightgcn_model(
+    config: Dict[str, Any],
+    num_users: int,
+    num_items: int,
+) -> torch.nn.Module:
+    model_cfg = config["model"]
+
+    model = LightGCN(
+        num_users=num_users,
+        num_items=num_items,
+        embedding_dim=model_cfg["embedding_dim"],
+        num_layers=model_cfg["num_layers"],
+    )
+    return model
 
 
 def build_sca_model(
@@ -116,6 +144,7 @@ def build_sca_model(
     model = SCA(**filtered_kwargs)
     return model
 
+
 def inspect_data_bundle(data_bundle) -> None:
     """
     Diagnose whether the processed split is valid for recommendation evaluation.
@@ -137,7 +166,6 @@ def inspect_data_bundle(data_bundle) -> None:
     print(f"[DIAG] valid_users={len(valid_users)}")
     print(f"[DIAG] test_users={len(test_users)}")
 
-    # overlap check
     train_valid_overlap_users = 0
     train_test_overlap_users = 0
     valid_test_overlap_users = 0
@@ -169,7 +197,6 @@ def inspect_data_bundle(data_bundle) -> None:
     print(f"[DIAG] train-test overlap users={train_test_overlap_users}, items={train_test_overlap_items}")
     print(f"[DIAG] valid-test overlap users={valid_test_overlap_users}, items={valid_test_overlap_items}")
 
-    # per-user label stats
     valid_gt_counts = [len(valid_user_pos[u]) for u in valid_users]
     test_gt_counts = [len(test_user_pos[u]) for u in test_users]
 
@@ -187,7 +214,6 @@ def inspect_data_bundle(data_bundle) -> None:
             f"avg={sum(test_gt_counts)/len(test_gt_counts):.4f}"
         )
 
-    # candidate size under test protocol: num_items - seen(train+valid)
     candidate_sizes = []
     for u in test_users[:20]:
         seen_items = set()
@@ -211,6 +237,7 @@ def inspect_data_bundle(data_bundle) -> None:
 
     print("[DIAG] ===== End Inspection =====")
 
+
 def build_optimizer(
     model: torch.nn.Module,
     config: Dict[str, Any],
@@ -223,6 +250,115 @@ def build_optimizer(
     )
 
 
+def build_trainer(
+    model: torch.nn.Module,
+    config: Dict[str, Any],
+    data_bundle,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    save_dir: str | None,
+):
+    model_type = config["model"].get("name", "sca").lower()
+    train_cfg = config["train"]
+
+    if model_type == "lightgcn":
+        trainer = LightGCNTrainer(
+            model=model,
+            train_pairs=data_bundle.train_pairs,
+            user_pos_dict=data_bundle.train_user_pos_dict,
+            norm_adj=data_bundle.norm_adj,
+            num_users=data_bundle.num_users,
+            num_items=data_bundle.num_items,
+            optimizer=optimizer,
+            device=device,
+            num_workers=train_cfg.get("num_workers", 0),
+            shuffle=train_cfg.get("shuffle", True),
+            scheduler=None,
+            grad_clip_norm=train_cfg.get("grad_clip_norm", None),
+            save_dir=save_dir,
+            weight_decay=train_cfg.get("lambda_reg", 1e-4),
+            pin_memory=train_cfg.get("pin_memory", True),
+            drop_last=train_cfg.get("drop_last", False),
+        )
+        trainer.set_batch_size(train_cfg["batch_size"])
+        return trainer
+
+    if model_type == "sca":
+        trainer = SCATrainer(
+            model=model,
+            data_bundle=data_bundle,
+            batch_size=train_cfg["batch_size"],
+            optimizer=optimizer,
+            device=device,
+            num_workers=train_cfg.get("num_workers", 0),
+            shuffle=train_cfg.get("shuffle", True),
+            scheduler=None,
+            grad_clip_norm=train_cfg.get("grad_clip_norm", None),
+            save_dir=save_dir,
+            lambda_align=train_cfg.get("lambda_align", 0.1),
+            lambda_reg=train_cfg.get("lambda_reg", 1e-4),
+            align_type=train_cfg.get("align_type", "cosine"),
+            pin_memory=train_cfg.get("pin_memory", True),
+            drop_last=train_cfg.get("drop_last", False),
+        )
+        return trainer
+
+    raise ValueError(f"Unsupported model.name: {model_type}")
+
+
+def print_epoch_metrics(model_type: str, epoch: int, metrics: Dict[str, float]) -> None:
+    if model_type == "lightgcn":
+        print(
+            f"[Epoch {epoch:03d}] "
+            f"loss={metrics['loss']:.6f} | "
+            f"bpr={metrics['bpr_loss']:.6f} | "
+            f"reg={metrics['reg_loss']:.6f} | "
+            f"pos_mean={metrics['pos_scores_mean']:.6f} | "
+            f"neg_mean={metrics['neg_scores_mean']:.6f} | "
+            f"pos>neg={metrics['pos_gt_neg_ratio']:.6f}"
+        )
+    else:
+        print(
+            f"[Epoch {epoch:03d}] "
+            f"loss={metrics['loss']:.6f} | "
+            f"bpr={metrics['bpr_loss']:.6f} | "
+            f"align={metrics['align_loss']:.6f} | "
+            f"reg={metrics['reg_loss']:.6f} | "
+            f"pos_mean={metrics['pos_scores_mean']:.6f} | "
+            f"neg_mean={metrics['neg_scores_mean']:.6f} | "
+            f"pos>neg={metrics['pos_gt_neg_ratio']:.6f} | "
+            f"delta_abs={metrics['delta_abs_mean']:.6f} | "
+            f"gate_mean={metrics['gate_mean']:.6f} | "
+            f"gate_std={metrics['gate_std']:.6f} | "
+            f"ctrl_shift={metrics['control_shift_mean']:.6f}"
+        )
+
+
+def patch_lightgcn_for_ranking_eval_if_needed(model: torch.nn.Module) -> torch.nn.Module:
+    """
+    RankingEvaluator expects:
+        model.full_sort_predict(norm_adj=..., user_ids=..., user_item_matrix=...)
+    But pure LightGCN currently exposes:
+        model.full_sort_scores(norm_adj, user_ids)
+
+    This patch adds a compatible method at runtime without changing model design.
+    """
+    if hasattr(model, "full_sort_predict"):
+        return model
+
+    if hasattr(model, "full_sort_scores"):
+        def _full_sort_predict(norm_adj, user_ids, user_item_matrix=None):
+            return model.full_sort_scores(norm_adj=norm_adj, user_ids=user_ids)
+
+        setattr(model, "full_sort_predict", _full_sort_predict)
+        return model
+
+    raise AttributeError(
+        "Model has neither `full_sort_predict` nor `full_sort_scores`, "
+        "cannot run ranking evaluation."
+    )
+
+
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
@@ -231,8 +367,11 @@ def main() -> None:
     seed = config.get("seed", 42)
     set_seed(seed)
 
+    model_type = config["model"].get("name", "sca").lower()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
+    print(f"[INFO] Model type: {model_type}")
 
     save_dir = maybe_make_save_dir(config)
 
@@ -252,31 +391,30 @@ def main() -> None:
     )
     inspect_data_bundle(data_bundle)
 
-    model = build_sca_model(
-        config=config,
-        num_users=data_bundle.num_users,
-        num_items=data_bundle.num_items,
-    )
+    if model_type == "lightgcn":
+        model = build_lightgcn_model(
+            config=config,
+            num_users=data_bundle.num_users,
+            num_items=data_bundle.num_items,
+        )
+    elif model_type == "sca":
+        model = build_sca_model(
+            config=config,
+            num_users=data_bundle.num_users,
+            num_items=data_bundle.num_items,
+        )
+    else:
+        raise ValueError(f"Unsupported model.name: {model_type}")
 
     optimizer = build_optimizer(model, config)
 
-    train_cfg = config["train"]
-    trainer = SCATrainer(
+    trainer = build_trainer(
         model=model,
+        config=config,
         data_bundle=data_bundle,
-        batch_size=train_cfg["batch_size"],
         optimizer=optimizer,
         device=device,
-        num_workers=train_cfg.get("num_workers", 0),
-        shuffle=train_cfg.get("shuffle", True),
-        scheduler=None,
-        grad_clip_norm=train_cfg.get("grad_clip_norm", None),
         save_dir=save_dir,
-        lambda_align=train_cfg.get("lambda_align", 0.1),
-        lambda_reg=train_cfg.get("lambda_reg", 1e-4),
-        align_type=train_cfg.get("align_type", "cosine"),
-        pin_memory=train_cfg.get("pin_memory", True),
-        drop_last=train_cfg.get("drop_last", False),
     )
 
     try:
@@ -285,28 +423,15 @@ def main() -> None:
     except Exception as e:
         print(f"[WARN] inspect_one_batch failed: {e}")
 
-    epochs = train_cfg["epochs"]
+    epochs = config["train"]["epochs"]
     for epoch in range(1, epochs + 1):
         metrics = trainer.train_one_epoch(epoch)
+        print_epoch_metrics(model_type=model_type, epoch=epoch, metrics=metrics)
 
-        print(
-            f"[Epoch {epoch:03d}] "
-            f"loss={metrics['loss']:.6f} | "
-            f"bpr={metrics['bpr_loss']:.6f} | "
-            f"align={metrics['align_loss']:.6f} | "
-            f"reg={metrics['reg_loss']:.6f} | "
-            f"pos_mean={metrics['pos_scores_mean']:.6f} | "
-            f"neg_mean={metrics['neg_scores_mean']:.6f} | "
-            f"pos>neg={metrics['pos_gt_neg_ratio']:.6f} | "
-            f"delta_abs={metrics['delta_abs_mean']:.6f} | "
-            f"gate_mean={metrics['gate_mean']:.6f} | "
-            f"gate_std={metrics['gate_std']:.6f} | "
-            f"ctrl_shift={metrics['control_shift_mean']:.6f}"
-        )
-
-        if save_dir is not None and train_cfg.get("save_every_epoch", False):
+        if save_dir is not None and config["train"].get("save_every_epoch", False):
+            file_prefix = "lightgcn" if model_type == "lightgcn" else "sca"
             trainer.save_checkpoint(
-                file_name=f"sca_epoch_{epoch}.pt",
+                file_name=f"{file_prefix}_epoch_{epoch}.pt",
                 epoch=epoch,
                 extra_state={"metrics": metrics, "config": config},
             )
@@ -314,16 +439,21 @@ def main() -> None:
     print("[INFO] Training finished.")
     print("[INFO] Start evaluation...")
 
+    eval_model = model
+    if model_type == "lightgcn":
+        eval_model = patch_lightgcn_for_ranking_eval_if_needed(model)
+
     evaluator = RankingEvaluator(k_list=[10], device=device)
 
     results = evaluator.evaluate(
-        model=model,
+        model=eval_model,
         data_bundle=data_bundle,
         split="test"
     )
 
     print("[RESULT] Test Metrics:")
     print(results)
+
 
 if __name__ == "__main__":
     main()
