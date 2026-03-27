@@ -1,9 +1,9 @@
 seed: 2024
 
 data:
-  train_path: data/processed/ml1m/train.csv
-  valid_path: data/processed/ml1m/valid.csv
-  test_path: data/processed/ml1m/test.csv
+  train_path: data/processed/ml-1m/train.csv
+  valid_path: data/processed/ml-1m/valid.csv
+  test_path: data/processed/ml-1m/test.csv
 
 model:
   name: lightgcn
@@ -17,8 +17,9 @@ train:
   lambda_reg: 1.0e-4
   num_workers: 0
   shuffle: true
-  pin_memory: true
+  pin_memory: false
   drop_last: false
+  max_batches_per_epoch: 20
 
 output:
   save_dir: outputs/lightgcn_smoke

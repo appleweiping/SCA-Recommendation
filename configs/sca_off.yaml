@@ -4,8 +4,9 @@ data:
   test_path: data/processed/ml-1m/test.csv
 
 model:
-  embedding_dim: 32
-  num_layers: 2
+  name: sca
+  embedding_dim: 64
+  num_layers: 3
   semantic_input_dim: 16
   semantic_dim: 32
   semantic_dropout: 0.0
@@ -18,19 +19,22 @@ model:
 train:
   lr: 0.001
   weight_decay: 0.0
-  batch_size: 4
-  epochs: 3
+  batch_size: 1024
+  epochs: 2
   num_workers: 0
   shuffle: true
   grad_clip_norm: 5.0
   lambda_align: 0.1
-  lambda_reg: 0.0001
+  lambda_reg: 1.0e-4
   align_type: cosine
   pin_memory: false
   drop_last: false
   save_every_epoch: false
 
-seed: 42
+  # 🚀 关键：加速
+  max_batches_per_epoch: 3
+
+seed: 2024
 
 output:
-  save_dir: checkpoints
+  save_dir: outputs/sca_off_smoke

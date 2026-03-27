@@ -281,6 +281,8 @@ def build_trainer(
             drop_last=train_cfg.get("drop_last", False),
         )
         trainer.set_batch_size(train_cfg["batch_size"])
+        if "max_batches_per_epoch" in train_cfg:
+            trainer.set_max_batches_per_epoch(train_cfg["max_batches_per_epoch"])
         return trainer
 
     if model_type == "sca":

@@ -62,6 +62,7 @@ class LightGCNTrainer(BaseTrainer):
         self.weight_decay = weight_decay
         self.pin_memory = pin_memory
         self.drop_last = drop_last
+        self.max_batches_per_epoch = None
 
         self.train_loader = self._build_train_loader()
 
@@ -104,6 +105,9 @@ class LightGCNTrainer(BaseTrainer):
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
         )
+    
+    def set_max_batches_per_epoch(self, max_batches: int | None) -> None:
+        self.max_batches_per_epoch = max_batches
 
     def _compute_all_embeddings(self) -> tuple[torch.Tensor, torch.Tensor]:
         user_all_embeddings, item_all_embeddings = self.model(self.norm_adj)
@@ -185,7 +189,11 @@ class LightGCNTrainer(BaseTrainer):
         total_pos_gt_neg = 0.0
         num_batches = 0
 
-        for batch in self.train_loader:
+
+
+        for batch_idx, batch in enumerate(self.train_loader):
+            if self.max_batches_per_epoch is not None and batch_idx >= self.max_batches_per_epoch:
+                break
             batch = self.move_batch_to_device(batch)
 
             user_ids = batch["user_ids"]

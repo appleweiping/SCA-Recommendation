@@ -117,30 +117,24 @@ class SCA(nn.Module):
         user_ids: torch.Tensor,
         item_all_embeddings: torch.Tensor,
         user_item_matrix: torch.Tensor,
+        user_degree: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Aggregate structural context c_u from user interaction neighborhood.
 
-        Engineering assumption:
-        - user_item_matrix is a sparse or dense matrix of shape (num_users, num_items)
-        - c_u is computed as normalized weighted average of interacted item embeddings
+        if not user_item_matrix.is_sparse:
+            raise ValueError("user_item_matrix must be a sparse torch tensor.")
 
-        Args:
-            user_ids: (B,)
-            item_all_embeddings: (num_items, D)
-            user_item_matrix: (num_users, num_items)
+        # 🚀 关键优化：稀疏乘法
+        c_all = torch.sparse.mm(user_item_matrix, item_all_embeddings)
 
-        Returns:
-            c_u: (B, D)
-        """
-        user_item_dense = user_item_matrix.to_dense()
-        user_item_sub = user_item_dense[user_ids]  # (B, num_items)
+        if user_degree is None:
+            row_sum = torch.sparse.sum(user_item_matrix, dim=1).to_dense().unsqueeze(1)
+            row_sum = row_sum.clamp_min(1.0)
+        else:
+            row_sum = user_degree
 
-        c_u = torch.matmul(user_item_sub, item_all_embeddings)
-        row_sum = user_item_sub.sum(dim=1, keepdim=True)
+        c_all = c_all / row_sum
 
-        row_sum = row_sum.clamp_min(1.0)
-        c_u = c_u / row_sum
+        c_u = c_all[user_ids]
         return c_u
 
     def fuse_user_representation(

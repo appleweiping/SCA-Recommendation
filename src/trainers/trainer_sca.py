@@ -65,6 +65,8 @@ class SCATrainer(BaseTrainer):
 
         self.norm_adj = data_bundle.norm_adj.to(self.device)
         self.user_item_matrix = data_bundle.user_item_matrix.to(self.device)
+        self.user_degree = torch.sparse.sum(self.user_item_matrix, dim=1).to_dense().unsqueeze(1)
+        self.user_degree = self.user_degree.clamp_min(1.0).to(self.device)
 
         self.train_dataset = InteractionDataset(data_bundle.train_pairs)
         self.train_collator = BPRTrainCollator(
@@ -125,10 +127,11 @@ class SCATrainer(BaseTrainer):
 
         # 4) structural context
         c_u = self.model.aggregate_structural_context(
-            user_ids=user_ids,
-            item_all_embeddings=item_all_embeddings,
-            user_item_matrix=self.user_item_matrix,
-        )
+        user_ids=user_ids,
+        item_all_embeddings=item_all_embeddings,
+        user_item_matrix=self.user_item_matrix,
+        user_degree=self.user_degree,   
+    )
 
         # 5) control injection
         user_emb, g_u = self.model.fuse_user_representation(
