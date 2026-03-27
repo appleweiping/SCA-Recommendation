@@ -51,6 +51,11 @@ class SCA(nn.Module):
         gate_type: str = "vector",
         control_scale: float = 1.0,
         dropout: float = 0.0,
+        use_control: bool = True,
+        use_gate: bool = True,
+        use_alignment: bool = True,
+        use_structure: bool = True,
+        fusion_mode: bool = False,
     ) -> None:
         super().__init__()
         self.backbone = backbone
@@ -58,6 +63,12 @@ class SCA(nn.Module):
         self.embedding_dim = embedding_dim
         self.semantic_dim = semantic_dim
         self.control_scale = control_scale
+
+        self.use_control = use_control
+        self.use_gate = use_gate
+        self.use_alignment = use_alignment
+        self.use_structure = use_structure
+        self.fusion_mode = fusion_mode
 
         self.projector = nn.Linear(semantic_dim, embedding_dim)
         self.projector_dropout = nn.Dropout(dropout)
@@ -108,9 +119,14 @@ class SCA(nn.Module):
             z_u: (B, semantic_dim)
             delta_u: (B, D)
         """
-        z_u = self.semantic_encoder(user_ids)
-        delta_u = self.projector(self.projector_dropout(z_u))
-        return z_u, delta_u
+
+        if self.use_control:
+            z_u = self.semantic_encoder(user_ids)
+            delta_u = self.projector(self.projector_dropout(z_u))
+        else:
+            z_u = torch.zeros((user_ids.shape[0], self.semantic_dim), device=user_ids.device)
+            delta_u = torch.zeros((user_ids.shape[0], self.embedding_dim), device=user_ids.device)
+            return z_u, delta_u
 
     def aggregate_structural_context(
         self,
@@ -159,8 +175,16 @@ class SCA(nn.Module):
             e_tilde_u: (B, D)
             g_u: (B, D) or (B, 1)
         """
-        g_u = self.gate(e_u, c_u, delta_u)
-        e_tilde_u = e_u + self.control_scale * (g_u * delta_u)
+        if self.use_gate:
+            g_u = self.gate(e_u, c_u, delta_u)
+        else:
+            g_u = torch.ones_like(e_u)
+
+        if self.fusion_mode:
+            e_tilde_u = e_u + delta_u  # 简单融合 baseline
+        else:
+            e_tilde_u = e_u + self.control_scale * (g_u * delta_u)
+
         return e_tilde_u, g_u
 
     def forward(
@@ -207,7 +231,11 @@ class SCA(nn.Module):
                 user_all_embeddings: (num_users, D)
                 item_all_embeddings: (num_items, D)
         """
-        user_all_embeddings, item_all_embeddings = self.get_collaborative_embeddings(norm_adj)
+        if self.use_structure:
+            user_all_embeddings, item_all_embeddings = self.get_collaborative_embeddings(norm_adj)
+        else:
+            user_all_embeddings = self.backbone.embedding_user.weight
+            item_all_embeddings = self.backbone.embedding_item.weight
 
         e_u = user_all_embeddings[user_ids]
         pos_item_emb = item_all_embeddings[pos_item_ids]

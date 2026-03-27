@@ -261,6 +261,10 @@ class SCATrainer(BaseTrainer):
                 neg_item_emb,
             )
 
+            if not self.model.use_alignment:
+                loss_dict["loss"] = loss_dict["bpr_loss"] + loss_dict["reg_loss"]
+                loss_dict["align_loss"] = torch.zeros_like(loss_dict["align_loss"])
+
             chunk_size = end - start
             weight = chunk_size / total_examples
             total_loss_tensor = total_loss_tensor + loss_dict["loss"] * weight
