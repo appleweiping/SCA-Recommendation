@@ -133,6 +133,11 @@ def build_sca_model(
         "gate_type": model_cfg.get("gate_type", "vector"),
         "control_scale": model_cfg.get("control_scale", 1.0),
         "dropout": model_cfg.get("dropout", 0.0),
+        "use_control": model_cfg.get("use_control", True),
+        "use_gate": model_cfg.get("use_gate", True),
+        "use_alignment": model_cfg.get("use_alignment", True),
+        "use_structure": model_cfg.get("use_structure", True),
+        "fusion_mode": model_cfg.get("fusion_mode", False),
     }
 
     sca_signature = inspect.signature(SCA.__init__)

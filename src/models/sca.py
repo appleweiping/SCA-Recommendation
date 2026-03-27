@@ -240,11 +240,15 @@ class SCA(nn.Module):
         neg_item_emb = item_all_embeddings[neg_item_ids]
 
         z_u, delta_u = self.project_semantic_signal(user_ids)
-        c_u = self.aggregate_structural_context(
-            user_ids=user_ids,
-            item_all_embeddings=item_all_embeddings,
-            user_item_matrix=user_item_matrix,
-        )
+
+        if self.use_structure:
+            c_u = self.aggregate_structural_context(
+                user_ids=user_ids,
+                item_all_embeddings=item_all_embeddings,
+                user_item_matrix=user_item_matrix,
+            )
+        else:
+            c_u = torch.zeros_like(e_u)
         user_emb, g_u = self.fuse_user_representation(e_u, c_u, delta_u)
 
         pos_scores = torch.sum(user_emb * pos_item_emb, dim=-1)
@@ -289,11 +293,16 @@ class SCA(nn.Module):
 
         e_u = user_all_embeddings[user_ids]
         _, delta_u = self.project_semantic_signal(user_ids)
-        c_u = self.aggregate_structural_context(
-            user_ids=user_ids,
-            item_all_embeddings=item_all_embeddings,
-            user_item_matrix=user_item_matrix,
-        )
+
+        if self.use_structure:
+            c_u = self.aggregate_structural_context(
+                user_ids=user_ids,
+                item_all_embeddings=item_all_embeddings,
+                user_item_matrix=user_item_matrix,
+            )
+        else:
+            c_u = torch.zeros_like(e_u)
+
         user_emb, _ = self.fuse_user_representation(e_u, c_u, delta_u)
 
         scores = torch.matmul(user_emb, item_all_embeddings.t())

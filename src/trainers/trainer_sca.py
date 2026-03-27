@@ -163,12 +163,16 @@ class SCATrainer(BaseTrainer):
         z_all, delta_all = self.model.project_semantic_signal(all_user_ids)
 
         # structural context for all users
-        c_all = self.model.aggregate_structural_context(
-            user_ids=all_user_ids,
-            item_all_embeddings=item_all_embeddings,
-            user_item_matrix=self.user_item_matrix,
-            user_degree=self.user_degree,
-        )
+        # structural context for all users
+        if self.model.use_structure:
+            c_all = self.model.aggregate_structural_context(
+                user_ids=all_user_ids,
+                item_all_embeddings=item_all_embeddings,
+                user_item_matrix=self.user_item_matrix,
+                user_degree=self.user_degree,
+            )
+        else:
+            c_all = torch.zeros_like(user_all_embeddings)
 
         # control injection for all users
         user_emb_all, g_all = self.model.fuse_user_representation(
