@@ -1,7 +1,6 @@
-# src/trainers/trainer_sca.py
-
 from __future__ import annotations
 
+import random
 from typing import Dict, Optional
 
 import torch
@@ -15,12 +14,16 @@ from src.trainers.trainer_base import BaseTrainer
 
 class SCATrainer(BaseTrainer):
     """
-    Minimal runnable trainer for SCA.
+    Accelerated SCA trainer.
 
-    Current version:
-    - standard per-batch recompute for collaborative embeddings
-    - no retain_graph
-    - adds debug statistics into epoch metrics
+    Key change:
+    - compute full-graph collaborative / semantic / control representations
+      ONCE per epoch
+    - then score train pairs in chunks
+    - accumulate one epoch loss
+    - backward ONLY once per epoch
+
+    This is much faster than recomputing the whole graph every batch.
     """
 
     def __init__(
@@ -65,9 +68,21 @@ class SCATrainer(BaseTrainer):
 
         self.norm_adj = data_bundle.norm_adj.to(self.device)
         self.user_item_matrix = data_bundle.user_item_matrix.to(self.device)
+
+        # precompute user degree once
         self.user_degree = torch.sparse.sum(self.user_item_matrix, dim=1).to_dense().unsqueeze(1)
         self.user_degree = self.user_degree.clamp_min(1.0).to(self.device)
 
+        self.num_users = data_bundle.num_users
+        self.num_items = data_bundle.num_items
+
+        self.train_pairs = data_bundle.train_pairs
+        self.train_user_pos_dict = data_bundle.train_user_pos_dict
+
+        # for optional quick smoke test
+        self.max_batches_per_epoch: Optional[int] = None
+
+        # keep dataloader only for inspect_one_batch
         self.train_dataset = InteractionDataset(data_bundle.train_pairs)
         self.train_collator = BPRTrainCollator(
             num_items=data_bundle.num_items,
@@ -84,102 +99,129 @@ class SCATrainer(BaseTrainer):
             drop_last=self.drop_last,
         )
 
-    def _forward_one_batch(
+    def set_max_batches_per_epoch(self, max_batches: Optional[int]) -> None:
+        self.max_batches_per_epoch = max_batches
+
+    def _sample_negative_items(
         self,
-        batch: Dict[str, torch.Tensor],
-    ) -> Dict[str, torch.Tensor]:
+        user_ids: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        Forward one batch using per-batch recompute.
+        Sample one negative item for each user in the given user_ids.
 
-        Input batch dict:
-            user_ids:     (B,)
-            pos_item_ids: (B,)
-            neg_item_ids: (B,)
-
-        Returns dict:
-            user_emb:     (B, D)
-            pos_item_emb: (B, D)
-            neg_item_emb: (B, D)
-            e_u:          (B, D)
-            c_u:          (B, D)
-            z_u:          (B, semantic_dim)
-            delta_u:      (B, D)
-            g_u:          (B, D) or (B, 1)
-            pos_scores:   (B,)
-            neg_scores:   (B,)
+        This runs once per epoch, not once per mini-batch.
         """
-        user_ids = batch["user_ids"]          # (B,)
-        pos_item_ids = batch["pos_item_ids"]  # (B,)
-        neg_item_ids = batch["neg_item_ids"]  # (B,)
+        neg_items = []
+        for u in user_ids.tolist():
+            pos_set = self.train_user_pos_dict[u]
+            neg = random.randrange(self.num_items)
+            while neg in pos_set:
+                neg = random.randrange(self.num_items)
+            neg_items.append(neg)
 
-        # 1) recompute collaborative embeddings every batch
+        return torch.tensor(neg_items, dtype=torch.long, device=self.device)
+
+    def _prepare_epoch_pairs(self) -> Dict[str, torch.Tensor]:
+        """
+        Build training triples for the whole epoch once.
+        Optionally truncate for smoke test using max_batches_per_epoch.
+        """
+        if self.max_batches_per_epoch is None:
+            pairs = self.train_pairs
+        else:
+            max_pairs = min(len(self.train_pairs), self.max_batches_per_epoch * self.batch_size)
+            pairs = self.train_pairs[:max_pairs]
+
+        user_ids = torch.tensor([u for u, _ in pairs], dtype=torch.long, device=self.device)
+        pos_item_ids = torch.tensor([i for _, i in pairs], dtype=torch.long, device=self.device)
+        neg_item_ids = self._sample_negative_items(user_ids)
+
+        if self.shuffle and user_ids.numel() > 1:
+            perm = torch.randperm(user_ids.size(0), device=self.device)
+            user_ids = user_ids[perm]
+            pos_item_ids = pos_item_ids[perm]
+            neg_item_ids = neg_item_ids[perm]
+
+        return {
+            "user_ids": user_ids,
+            "pos_item_ids": pos_item_ids,
+            "neg_item_ids": neg_item_ids,
+        }
+
+    def _forward_all_users(self) -> Dict[str, torch.Tensor]:
+        """
+        Full-graph forward ONCE per epoch.
+        """
+        all_user_ids = torch.arange(self.num_users, device=self.device)
+
+        # collaborative embeddings
         user_all_embeddings, item_all_embeddings = self.model.get_collaborative_embeddings(
             self.norm_adj
         )
 
-        # 2) index collaborative embeddings
-        e_u = user_all_embeddings[user_ids]               # (B, D)
-        pos_item_emb = item_all_embeddings[pos_item_ids]  # (B, D)
-        neg_item_emb = item_all_embeddings[neg_item_ids]  # (B, D)
+        # semantic branch for all users
+        z_all, delta_all = self.model.project_semantic_signal(all_user_ids)
 
-        # 3) semantic branch
-        z_u, delta_u = self.model.project_semantic_signal(user_ids)
-
-        # 4) structural context
-        c_u = self.model.aggregate_structural_context(
-        user_ids=user_ids,
-        item_all_embeddings=item_all_embeddings,
-        user_item_matrix=self.user_item_matrix,
-        user_degree=self.user_degree,   
-    )
-
-        # 5) control injection
-        user_emb, g_u = self.model.fuse_user_representation(
-            e_u=e_u,
-            c_u=c_u,
-            delta_u=delta_u,
+        # structural context for all users
+        c_all = self.model.aggregate_structural_context(
+            user_ids=all_user_ids,
+            item_all_embeddings=item_all_embeddings,
+            user_item_matrix=self.user_item_matrix,
+            user_degree=self.user_degree,
         )
 
-        # 6) pairwise scores
-        pos_scores = torch.sum(user_emb * pos_item_emb, dim=-1)  # (B,)
-        neg_scores = torch.sum(user_emb * neg_item_emb, dim=-1)  # (B,)
+        # control injection for all users
+        user_emb_all, g_all = self.model.fuse_user_representation(
+            e_u=user_all_embeddings,
+            c_u=c_all,
+            delta_u=delta_all,
+        )
 
         return {
-            "user_emb": user_emb,
-            "pos_item_emb": pos_item_emb,
-            "neg_item_emb": neg_item_emb,
-            "e_u": e_u,
-            "c_u": c_u,
-            "z_u": z_u,
-            "delta_u": delta_u,
-            "g_u": g_u,
-            "pos_scores": pos_scores,
-            "neg_scores": neg_scores,
+            "user_emb_all": user_emb_all,
+            "item_all_embeddings": item_all_embeddings,
+            "e_all": user_all_embeddings,
+            "c_all": c_all,
+            "z_all": z_all,
+            "delta_all": delta_all,
+            "g_all": g_all,
         }
 
     def train_one_epoch(self, epoch: int) -> Dict[str, float]:
         """
-        Train one epoch and return scalar metrics.
-
-        Added debug stats:
-            - pos_scores_mean
-            - neg_scores_mean
-            - pos_gt_neg_ratio
-            - delta_abs_mean
-            - gate_mean
-            - gate_std
-            - control_shift_mean = (user_emb - e_u).abs().mean()
+        One epoch = one full-graph forward + one optimizer step.
         """
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
 
+        epoch_pairs = self._prepare_epoch_pairs()
+        user_ids_all = epoch_pairs["user_ids"]
+        pos_item_ids_all = epoch_pairs["pos_item_ids"]
+        neg_item_ids_all = epoch_pairs["neg_item_ids"]
+
+        total_examples = int(user_ids_all.size(0))
+        if total_examples == 0:
+            raise ValueError("No training pairs available for this epoch.")
+
+        # full forward once
+        full_outputs = self._forward_all_users()
+
+        user_emb_all = full_outputs["user_emb_all"]
+        item_all_embeddings = full_outputs["item_all_embeddings"]
+        e_all = full_outputs["e_all"]
+        c_all = full_outputs["c_all"]
+        delta_all = full_outputs["delta_all"]
+        g_all = full_outputs["g_all"]
+
+        # accumulate tensor loss for one backward
+        total_loss_tensor = torch.zeros([], device=self.device)
+
+        # scalar stats
         total_loss = 0.0
         total_bpr = 0.0
         total_align = 0.0
         total_reg = 0.0
-        total_examples = 0
 
-        # debug stats
         total_pos_scores_mean = 0.0
         total_neg_scores_mean = 0.0
         total_pos_gt_neg_ratio = 0.0
@@ -188,114 +230,132 @@ class SCATrainer(BaseTrainer):
         total_gate_std = 0.0
         total_control_shift_mean = 0.0
 
-        num_batches = len(self.train_loader)
-        if num_batches == 0:
-            raise ValueError("train_loader is empty; cannot train.")
+        num_chunks = 0
 
-        for batch in self.train_loader:
-            batch = self.move_batch_to_device(batch)
-            batch_size = batch["user_ids"].size(0)
-            total_examples += batch_size
+        for start in range(0, total_examples, self.batch_size):
+            end = min(start + self.batch_size, total_examples)
 
-            outputs = self._forward_one_batch(batch=batch)
+            user_ids = user_ids_all[start:end]
+            pos_item_ids = pos_item_ids_all[start:end]
+            neg_item_ids = neg_item_ids_all[start:end]
+
+            user_emb = user_emb_all[user_ids]
+            pos_item_emb = item_all_embeddings[pos_item_ids]
+            neg_item_emb = item_all_embeddings[neg_item_ids]
+
+            e_u = e_all[user_ids]
+            c_u = c_all[user_ids]
+            delta_u = delta_all[user_ids]
+            g_u = g_all[user_ids]
+
+            pos_scores = torch.sum(user_emb * pos_item_emb, dim=-1)
+            neg_scores = torch.sum(user_emb * neg_item_emb, dim=-1)
 
             loss_dict = self.criterion(
-                outputs["pos_scores"],
-                outputs["neg_scores"],
-                outputs["delta_u"],
-                outputs["c_u"],
-                outputs["user_emb"],
-                outputs["pos_item_emb"],
-                outputs["neg_item_emb"],
+                pos_scores,
+                neg_scores,
+                delta_u,
+                c_u,
+                user_emb,
+                pos_item_emb,
+                neg_item_emb,
             )
 
-            loss = loss_dict["loss"]
-            loss.backward()
+            chunk_size = end - start
+            weight = chunk_size / total_examples
+            total_loss_tensor = total_loss_tensor + loss_dict["loss"] * weight
 
-            self.clip_gradients()
-            self.optimizer.step()
-            self.optimizer.zero_grad(set_to_none=True)
+            # detached scalar stats
+            total_loss += float(loss_dict["loss"].detach().item()) * chunk_size
+            total_bpr += float(loss_dict["bpr_loss"].detach().item()) * chunk_size
+            total_align += float(loss_dict["align_loss"].detach().item()) * chunk_size
+            total_reg += float(loss_dict["reg_loss"].detach().item()) * chunk_size
 
-            # base losses
-            total_loss += float(loss.detach().item()) * batch_size
-            total_bpr += float(loss_dict["bpr_loss"].detach().item()) * batch_size
-            total_align += float(loss_dict["align_loss"].detach().item()) * batch_size
-            total_reg += float(loss_dict["reg_loss"].detach().item()) * batch_size
+            pos_scores_mean = pos_scores.detach().mean().item()
+            neg_scores_mean = neg_scores.detach().mean().item()
+            pos_gt_neg_ratio = (pos_scores.detach() > neg_scores.detach()).float().mean().item()
+            delta_abs_mean = delta_u.detach().abs().mean().item()
+            gate_mean = g_u.detach().mean().item()
+            gate_std = g_u.detach().std().item()
+            control_shift_mean = (user_emb.detach() - e_u.detach()).abs().mean().item()
 
-            # debug stats
-            pos_scores_mean = outputs["pos_scores"].detach().mean().item()
-            neg_scores_mean = outputs["neg_scores"].detach().mean().item()
-            pos_gt_neg_ratio = (
-                (outputs["pos_scores"].detach() > outputs["neg_scores"].detach())
-                .float()
-                .mean()
-                .item()
-            )
-            delta_abs_mean = outputs["delta_u"].detach().abs().mean().item()
-            gate_mean = outputs["g_u"].detach().mean().item()
-            gate_std = outputs["g_u"].detach().std().item()
-            control_shift_mean = (
-                (outputs["user_emb"].detach() - outputs["e_u"].detach())
-                .abs()
-                .mean()
-                .item()
-            )
+            total_pos_scores_mean += pos_scores_mean * chunk_size
+            total_neg_scores_mean += neg_scores_mean * chunk_size
+            total_pos_gt_neg_ratio += pos_gt_neg_ratio * chunk_size
+            total_delta_abs_mean += delta_abs_mean * chunk_size
+            total_gate_mean += gate_mean * chunk_size
+            total_gate_std += gate_std * chunk_size
+            total_control_shift_mean += control_shift_mean * chunk_size
 
-            total_pos_scores_mean += pos_scores_mean * batch_size
-            total_neg_scores_mean += neg_scores_mean * batch_size
-            total_pos_gt_neg_ratio += pos_gt_neg_ratio * batch_size
-            total_delta_abs_mean += delta_abs_mean * batch_size
-            total_gate_mean += gate_mean * batch_size
-            total_gate_std += gate_std * batch_size
-            total_control_shift_mean += control_shift_mean * batch_size
+            num_chunks += 1
 
+        # one backward only
+        total_loss_tensor.backward()
+        self.clip_gradients()
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
         self.step_scheduler()
+
+        denom = max(total_examples, 1)
 
         metrics = {
             "epoch": float(epoch),
-            "loss": total_loss / max(total_examples, 1),
-            "bpr_loss": total_bpr / max(total_examples, 1),
-            "align_loss": total_align / max(total_examples, 1),
-            "reg_loss": total_reg / max(total_examples, 1),
+            "loss": total_loss / denom,
+            "bpr_loss": total_bpr / denom,
+            "align_loss": total_align / denom,
+            "reg_loss": total_reg / denom,
             "num_examples": float(total_examples),
-            "num_batches": float(num_batches),
-            # debug metrics
-            "pos_scores_mean": total_pos_scores_mean / max(total_examples, 1),
-            "neg_scores_mean": total_neg_scores_mean / max(total_examples, 1),
-            "pos_gt_neg_ratio": total_pos_gt_neg_ratio / max(total_examples, 1),
-            "delta_abs_mean": total_delta_abs_mean / max(total_examples, 1),
-            "gate_mean": total_gate_mean / max(total_examples, 1),
-            "gate_std": total_gate_std / max(total_examples, 1),
-            "control_shift_mean": total_control_shift_mean / max(total_examples, 1),
+            "num_batches": float(num_chunks),
+            "pos_scores_mean": total_pos_scores_mean / denom,
+            "neg_scores_mean": total_neg_scores_mean / denom,
+            "pos_gt_neg_ratio": total_pos_gt_neg_ratio / denom,
+            "delta_abs_mean": total_delta_abs_mean / denom,
+            "gate_mean": total_gate_mean / denom,
+            "gate_std": total_gate_std / denom,
+            "control_shift_mean": total_control_shift_mean / denom,
         }
         return metrics
 
     @torch.no_grad()
     def inspect_one_batch(self) -> Dict[str, tuple]:
         """
-        Optional debugging helper:
-        Returns tensor shapes from one batch forward pass.
+        Debug helper using one sampled batch.
         """
         self.model.eval()
 
         batch = next(iter(self.train_loader))
         batch = self.move_batch_to_device(batch)
 
-        outputs = self._forward_one_batch(batch=batch)
+        full_outputs = self._forward_all_users()
+
+        user_ids = batch["user_ids"]
+        pos_item_ids = batch["pos_item_ids"]
+        neg_item_ids = batch["neg_item_ids"]
+
+        user_emb = full_outputs["user_emb_all"][user_ids]
+        pos_item_emb = full_outputs["item_all_embeddings"][pos_item_ids]
+        neg_item_emb = full_outputs["item_all_embeddings"][neg_item_ids]
+        e_u = full_outputs["e_all"][user_ids]
+        c_u = full_outputs["c_all"][user_ids]
+        z_u = full_outputs["z_all"][user_ids]
+        delta_u = full_outputs["delta_all"][user_ids]
+        g_u = full_outputs["g_all"][user_ids]
+        pos_scores = torch.sum(user_emb * pos_item_emb, dim=-1)
+        neg_scores = torch.sum(user_emb * neg_item_emb, dim=-1)
 
         shape_dict = {
             "user_ids": tuple(batch["user_ids"].shape),
             "pos_item_ids": tuple(batch["pos_item_ids"].shape),
             "neg_item_ids": tuple(batch["neg_item_ids"].shape),
-            "user_emb": tuple(outputs["user_emb"].shape),
-            "pos_item_emb": tuple(outputs["pos_item_emb"].shape),
-            "neg_item_emb": tuple(outputs["neg_item_emb"].shape),
-            "e_u": tuple(outputs["e_u"].shape),
-            "c_u": tuple(outputs["c_u"].shape),
-            "z_u": tuple(outputs["z_u"].shape),
-            "delta_u": tuple(outputs["delta_u"].shape),
-            "g_u": tuple(outputs["g_u"].shape),
-            "pos_scores": tuple(outputs["pos_scores"].shape),
-            "neg_scores": tuple(outputs["neg_scores"].shape),
+            "user_emb": tuple(user_emb.shape),
+            "pos_item_emb": tuple(pos_item_emb.shape),
+            "neg_item_emb": tuple(neg_item_emb.shape),
+            "e_u": tuple(e_u.shape),
+            "c_u": tuple(c_u.shape),
+            "z_u": tuple(z_u.shape),
+            "delta_u": tuple(delta_u.shape),
+            "g_u": tuple(g_u.shape),
+            "pos_scores": tuple(pos_scores.shape),
+            "neg_scores": tuple(neg_scores.shape),
         }
         return shape_dict

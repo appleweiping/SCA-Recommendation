@@ -1,3 +1,5 @@
+seed: 2024
+
 data:
   train_path: data/processed/ml-1m/train.csv
   valid_path: data/processed/ml-1m/valid.csv
@@ -20,7 +22,7 @@ train:
   lr: 0.001
   weight_decay: 0.0
   batch_size: 4096
-  epochs: 2
+  epochs: 10
   num_workers: 0
   shuffle: true
   grad_clip_norm: 5.0
@@ -30,11 +32,7 @@ train:
   pin_memory: false
   drop_last: false
   save_every_epoch: false
-
-  # 🚀 关键：加速
-  max_batches_per_epoch: 3
-
-seed: 2024
+  max_batches_per_epoch: 50
 
 output:
-  save_dir: outputs/sca_on_smoke
+  save_dir: outputs/sca_on_mid

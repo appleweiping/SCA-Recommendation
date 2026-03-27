@@ -19,7 +19,7 @@ model:
 train:
   lr: 0.001
   weight_decay: 0.0
-  batch_size: 1024
+  batch_size: 4096
   epochs: 2
   num_workers: 0
   shuffle: true

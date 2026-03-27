@@ -1,0 +1,26 @@
+seed: 2024
+
+data:
+  train_path: data/processed/ml-1m/train.csv
+  valid_path: data/processed/ml-1m/valid.csv
+  test_path: data/processed/ml-1m/test.csv
+
+model:
+  name: lightgcn
+  embedding_dim: 64
+  num_layers: 3
+
+train:
+  lr: 0.001
+  batch_size: 4096
+  epochs: 10
+  lambda_reg: 1.0e-4
+  weight_decay: 0.0
+  num_workers: 0
+  shuffle: true
+  pin_memory: false
+  drop_last: false
+  max_batches_per_epoch: 50
+
+output:
+  save_dir: outputs/lightgcn_mid

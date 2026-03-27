@@ -303,6 +303,8 @@ def build_trainer(
             pin_memory=train_cfg.get("pin_memory", True),
             drop_last=train_cfg.get("drop_last", False),
         )
+        if "max_batches_per_epoch" in train_cfg:
+            trainer.set_max_batches_per_epoch(train_cfg["max_batches_per_epoch"])
         return trainer
 
     raise ValueError(f"Unsupported model.name: {model_type}")
