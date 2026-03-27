@@ -104,29 +104,27 @@ class SCA(nn.Module):
         """
         return self.backbone(norm_adj)
 
-    def project_semantic_signal(self, user_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def project_semantic_signal(
+        self,
+        user_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute z_u and Delta_u.
-
-        Paper:
-            z_u = LLM(x_u)
-            Delta_u = W z_u
-
-        Args:
-            user_ids: (B,)
-
-        Returns:
-            z_u: (B, semantic_dim)
-            delta_u: (B, D)
         """
-
         if self.use_control:
             z_u = self.semantic_encoder(user_ids)
             delta_u = self.projector(self.projector_dropout(z_u))
         else:
-            z_u = torch.zeros((user_ids.shape[0], self.semantic_dim), device=user_ids.device)
-            delta_u = torch.zeros((user_ids.shape[0], self.embedding_dim), device=user_ids.device)
-            return z_u, delta_u
+            z_u = torch.zeros(
+                (user_ids.shape[0], self.semantic_dim),
+                device=user_ids.device,
+            )
+            delta_u = torch.zeros(
+                (user_ids.shape[0], self.embedding_dim),
+                device=user_ids.device,
+            )
+
+        return z_u, delta_u
 
     def aggregate_structural_context(
         self,
