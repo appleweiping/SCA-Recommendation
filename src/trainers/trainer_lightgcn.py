@@ -1,4 +1,3 @@
-# src/trainers/trainer_lightgcn.py
 from __future__ import annotations
 
 import time
@@ -15,19 +14,13 @@ from src.data.sampler import BPRTrainCollator
 
 class LightGCNTrainer(BaseTrainer):
     """
-    Pure LightGCN trainer for baseline experiments on implicit-feedback recommendation.
+    Pure LightGCN trainer for baseline experiments.
 
-    This trainer is designed to fit the current SCA-Recommendation project structure:
-    - training data comes from InteractionDataset(train_pairs)
-    - negative sampling is handled by BPRTrainCollator
-    - model is src.models.lightgcn.LightGCN
-    - graph input is the sparse normalized adjacency matrix norm_adj
-
-    Training objective:
-        BPR loss + L2 regularization on ego embeddings
-
-    Returned logs are intentionally simple so they can be printed directly
-    or saved later into log.txt / metrics.json by run.py.
+    This trainer is aligned with the current project structure:
+    - BaseTrainer handles device / checkpoint / gradient clipping utilities
+    - InteractionDataset(train_pairs) provides (user_id, pos_item_id)
+    - BPRTrainCollator samples one negative item per positive interaction
+    - LightGCN.forward(norm_adj) returns (user_all_embeddings, item_all_embeddings)
     """
 
     def __init__(
@@ -38,34 +31,37 @@ class LightGCNTrainer(BaseTrainer):
         norm_adj: torch.Tensor,
         num_users: int,
         num_items: int,
-        config: Dict[str, Any],
-        device: torch.device,
+        optimizer: torch.optim.Optimizer,
+        device: str | torch.device = "cpu",
+        num_workers: int = 0,
+        shuffle: bool = True,
+        scheduler: Any | None = None,
+        grad_clip_norm: float | None = None,
+        save_dir: str | None = None,
+        weight_decay: float = 1e-4,
+        pin_memory: bool = True,
+        drop_last: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            scheduler=scheduler,
+            grad_clip_norm=grad_clip_norm,
+            save_dir=save_dir,
+        )
 
-        self.model = model.to(device)
         self.train_pairs = train_pairs
         self.user_pos_dict = user_pos_dict
-        self.norm_adj = norm_adj.coalesce().to(device)
+        self.norm_adj = norm_adj.coalesce().to(self.device)
         self.num_users = num_users
         self.num_items = num_items
-        self.config = config
-        self.device = device
 
-        train_cfg = config.get("train", {})
-        model_cfg = config.get("model", {})
-
-        self.batch_size = int(train_cfg.get("batch_size", 1024))
-        self.lr = float(train_cfg.get("lr", 1e-3))
-        self.weight_decay = float(train_cfg.get("weight_decay", 1e-6))
-        self.num_workers = int(train_cfg.get("num_workers", 0))
-        self.embedding_dim = int(model_cfg.get("embedding_dim", 64))
-
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(),
-            lr=self.lr,
-            weight_decay=0.0,  # keep explicit reg term for classic LightGCN-style BPR
-        )
+        self.num_workers = num_workers
+        self.shuffle = shuffle
+        self.weight_decay = weight_decay
+        self.pin_memory = pin_memory
+        self.drop_last = drop_last
 
         self.train_loader = self._build_train_loader()
 
@@ -79,19 +75,37 @@ class LightGCNTrainer(BaseTrainer):
 
         return DataLoader(
             dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
+            batch_size=1024 if len(dataset) > 1024 else max(len(dataset), 1),
+            shuffle=self.shuffle,
             num_workers=self.num_workers,
             collate_fn=collator,
-            drop_last=False,
+            pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
+        )
+
+    def set_batch_size(self, batch_size: int) -> None:
+        """
+        Rebuild train loader with a user-specified batch size.
+        Useful because current run.py passes batch_size externally.
+        """
+        dataset = InteractionDataset(self.train_pairs)
+        collator = BPRTrainCollator(
+            num_items=self.num_items,
+            user_pos_dict=self.user_pos_dict,
+            num_negatives=1,
+        )
+
+        self.train_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=self.shuffle,
+            num_workers=self.num_workers,
+            collate_fn=collator,
+            pin_memory=self.pin_memory,
+            drop_last=self.drop_last,
         )
 
     def _compute_all_embeddings(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        LightGCN.forward(norm_adj) returns:
-            user_all_embeddings: (num_users, embedding_dim)
-            item_all_embeddings: (num_items, embedding_dim)
-        """
         user_all_embeddings, item_all_embeddings = self.model(self.norm_adj)
         return user_all_embeddings, item_all_embeddings
 
@@ -101,12 +115,8 @@ class LightGCNTrainer(BaseTrainer):
         pos_emb: torch.Tensor,
         neg_emb: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Standard BPR loss.
-        """
         pos_scores = torch.sum(user_emb * pos_emb, dim=-1)
         neg_scores = torch.sum(user_emb * neg_emb, dim=-1)
-
         loss = -torch.log(torch.sigmoid(pos_scores - neg_scores) + 1e-12).mean()
         return loss, pos_scores, neg_scores
 
@@ -116,10 +126,6 @@ class LightGCNTrainer(BaseTrainer):
         pos_item_ids: torch.Tensor,
         neg_item_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        L2 regularization on ego embeddings (raw trainable embeddings),
-        which is the usual choice in LightGCN-style training.
-        """
         user_emb_ego = self.model.user_embedding(user_ids)
         pos_emb_ego = self.model.item_embedding(pos_item_ids)
         neg_emb_ego = self.model.item_embedding(neg_item_ids)
@@ -133,21 +139,14 @@ class LightGCNTrainer(BaseTrainer):
         return 0.5 * reg
 
     def inspect_one_batch(self) -> Dict[str, Any]:
-        """
-        Minimal sanity check before formal training.
-
-        Useful for verifying:
-        - batch keys
-        - embedding shapes
-        - score ranges
-        - whether pos_score > neg_score is at least numerically valid
-        """
         self.model.eval()
 
         batch = next(iter(self.train_loader))
-        user_ids = batch["user_ids"].to(self.device)
-        pos_item_ids = batch["pos_item_ids"].to(self.device)
-        neg_item_ids = batch["neg_item_ids"].to(self.device)
+        batch = self.move_batch_to_device(batch)
+
+        user_ids = batch["user_ids"]
+        pos_item_ids = batch["pos_item_ids"]
+        neg_item_ids = batch["neg_item_ids"]
 
         with torch.no_grad():
             user_all_embeddings, item_all_embeddings = self._compute_all_embeddings()
@@ -175,11 +174,6 @@ class LightGCNTrainer(BaseTrainer):
         }
 
     def train_one_epoch(self, epoch: int) -> Dict[str, float]:
-        """
-        Train LightGCN for one epoch.
-
-        Returns averaged epoch-level statistics.
-        """
         self.model.train()
         start_time = time.time()
 
@@ -192,9 +186,11 @@ class LightGCNTrainer(BaseTrainer):
         num_batches = 0
 
         for batch in self.train_loader:
-            user_ids = batch["user_ids"].to(self.device)
-            pos_item_ids = batch["pos_item_ids"].to(self.device)
-            neg_item_ids = batch["neg_item_ids"].to(self.device)
+            batch = self.move_batch_to_device(batch)
+
+            user_ids = batch["user_ids"]
+            pos_item_ids = batch["pos_item_ids"]
+            neg_item_ids = batch["neg_item_ids"]
 
             user_all_embeddings, item_all_embeddings = self._compute_all_embeddings()
 
@@ -209,6 +205,7 @@ class LightGCNTrainer(BaseTrainer):
 
             self.optimizer.zero_grad()
             loss.backward()
+            self.clip_gradients()
             self.optimizer.step()
 
             total_loss += float(loss.item())
@@ -219,6 +216,8 @@ class LightGCNTrainer(BaseTrainer):
             total_pos_gt_neg += float((pos_scores > neg_scores).float().mean().item())
             num_batches += 1
 
+        self.step_scheduler()
+
         epoch_time = time.time() - start_time
         denom = max(num_batches, 1)
 
@@ -227,17 +226,13 @@ class LightGCNTrainer(BaseTrainer):
             "loss": total_loss / denom,
             "bpr_loss": total_bpr_loss / denom,
             "reg_loss": total_reg_loss / denom,
-            "pos_mean": total_pos_mean / denom,
-            "neg_mean": total_neg_mean / denom,
-            "pos_gt_neg": total_pos_gt_neg / denom,
+            "pos_scores_mean": total_pos_mean / denom,
+            "neg_scores_mean": total_neg_mean / denom,
+            "pos_gt_neg_ratio": total_pos_gt_neg / denom,
             "epoch_time_sec": epoch_time,
         }
 
     def fit(self, num_epochs: int) -> List[Dict[str, float]]:
-        """
-        Optional convenience wrapper.
-        If run.py already loops externally by epoch, this method can be unused.
-        """
         history: List[Dict[str, float]] = []
         for epoch in range(1, num_epochs + 1):
             stats = self.train_one_epoch(epoch)
